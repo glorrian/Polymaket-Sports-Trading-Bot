@@ -3,10 +3,13 @@
 import asyncio
 import json
 import urllib.request
+from dataclasses import asdict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from poly_sports.data_fetching.fetch_odds_comparison import main as refresh_comparison_pipeline
+from poly_sports.db.history_capture import is_data_capture_enabled, maybe_capture_data_run
+from poly_sports.db.history_repository import HistoryRepository
 from poly_sports.db.repository import TradingRepository
 from poly_sports.processing.arbitrage_calculation import detect_arbitrage_opportunities
 from poly_sports.utils.file_utils import load_json
@@ -42,6 +45,8 @@ class AutoTraderEngine:
         self._cycle_count = 0
         self._comparison_interval = 3
         self._market_slugs: Dict[str, str] = {}
+        self._last_live_price_snapshots: List[Dict[str, Any]] = []
+        self._last_live_raw_payloads: List[Dict[str, Any]] = []
 
         if config.trading_mode == "paper":
             self.execution_adapter = PaperExecutionAdapter(config)
@@ -52,134 +57,198 @@ class AutoTraderEngine:
     async def run_cycle(self) -> Dict[str, int]:
         self._cycle_count += 1
         need_comparison = (self._cycle_count % self._comparison_interval == 1)
+        capture_enabled = is_data_capture_enabled(default=True)
 
         opened = 0
         denied = 0
         skipped_duplicate = 0
         signals_count = 0
+        closed = 0
+        summary: Dict[str, int] = {}
 
         async with self._session_factory() as session:
             repo = TradingRepository(session)
-
-            if self._cycle_count == 1:
-                self.positions = {p.position_id: p for p in await repo.get_open_positions()}
-                self.seen_signal_ids = await repo.get_seen_signal_ids()
-                self.realized_pnl_today = await repo.get_realized_pnl_today()
-
-            if need_comparison:
-                comparison_data = self._load_comparison_data()
-                raw_opps = detect_arbitrage_opportunities(
-                    comparison_data,
-                    min_profit_threshold=self.config.min_profit_threshold,
-                    min_liquidity=self.config.min_liquidity_usd,
+            history_repo = HistoryRepository(session)
+            run_id: Optional[str] = None
+            if capture_enabled:
+                run_id = await history_repo.start_data_run(
+                    run_type="auto_trader_cycle",
+                    source="auto_trader",
+                    config={
+                        **asdict(self.config),
+                        "cycle_count": self._cycle_count,
+                        "need_comparison": need_comparison,
+                    },
                 )
-                opportunities = [opportunity_from_dict(row) for row in raw_opps]
-                cycle_bucket = self._build_cycle_bucket()
-                signals = build_signals(opportunities, cycle_bucket)
-                signals_count = len(signals)
 
-                for signal in signals:
-                    await repo.save_signal(signal)
-                    if not should_open_signal(signal.signal_id, self.seen_signal_ids):
-                        skipped_duplicate += 1
+            try:
+                if self._cycle_count == 1:
+                    self.positions = {p.position_id: p for p in await repo.get_open_positions()}
+                    self.seen_signal_ids = await repo.get_seen_signal_ids()
+                    self.realized_pnl_today = await repo.get_realized_pnl_today()
+
+                if need_comparison:
+                    comparison_data = self._load_comparison_data(run_id=run_id, capture_enabled=capture_enabled)
+                    if capture_enabled and run_id:
+                        await history_repo.save_raw_payload(
+                            source="file_cache",
+                            endpoint=self.config.comparison_data_path,
+                            request_params={"kind": "trading_comparison_input"},
+                            payload=comparison_data,
+                            run_id=run_id,
+                        )
+                        await history_repo.save_comparison_snapshots(comparison_data, run_id=run_id)
+
+                    raw_opps = detect_arbitrage_opportunities(
+                        comparison_data,
+                        min_profit_threshold=self.config.min_profit_threshold,
+                        min_liquidity=self.config.min_liquidity_usd,
+                    )
+                    if capture_enabled and run_id:
+                        await history_repo.save_opportunity_snapshots(raw_opps, run_id=run_id)
+
+                    opportunities = [opportunity_from_dict(row) for row in raw_opps]
+                    cycle_bucket = self._build_cycle_bucket()
+                    signals = build_signals(opportunities, cycle_bucket)
+                    signals_count = len(signals)
+
+                    for signal in signals:
+                        await repo.save_signal(signal)
+                        if not should_open_signal(signal.signal_id, self.seen_signal_ids):
+                            skipped_duplicate += 1
+                            await repo.save_risk_event(
+                                event_id=f"risk-{signal.signal_id}",
+                                signal_id=signal.signal_id,
+                                market_id=signal.market_id,
+                                allow=False,
+                                reason_code="duplicate_signal",
+                                message="Signal already processed earlier.",
+                                details={},
+                                created_at=utc_now_iso(),
+                            )
+                            continue
+
+                        realized_pnl = await repo.get_realized_pnl_today()
+                        decision = self.risk.evaluate_entry(
+                            signal=signal,
+                            open_positions=self.positions.values(),
+                            realized_pnl_today_usd=realized_pnl,
+                        )
                         await repo.save_risk_event(
                             event_id=f"risk-{signal.signal_id}",
                             signal_id=signal.signal_id,
                             market_id=signal.market_id,
-                            allow=False,
-                            reason_code="duplicate_signal",
-                            message="Signal already processed earlier.",
-                            details={},
+                            allow=decision.allow,
+                            reason_code=decision.reason_code,
+                            message=decision.message,
+                            details=decision.details,
                             created_at=utc_now_iso(),
                         )
-                        continue
+                        if not decision.allow:
+                            denied += 1
+                            continue
 
-                    realized_pnl = await repo.get_realized_pnl_today()
-                    decision = self.risk.evaluate_entry(
-                        signal=signal,
-                        open_positions=self.positions.values(),
-                        realized_pnl_today_usd=realized_pnl,
-                    )
-                    await repo.save_risk_event(
-                        event_id=f"risk-{signal.signal_id}",
-                        signal_id=signal.signal_id,
-                        market_id=signal.market_id,
-                        allow=decision.allow,
-                        reason_code=decision.reason_code,
-                        message=decision.message,
-                        details=decision.details,
-                        created_at=utc_now_iso(),
-                    )
-                    if not decision.allow:
-                        denied += 1
-                        continue
-
-                    intent = OrderIntent(
-                        signal_id=signal.signal_id,
-                        market_id=signal.market_id,
-                        event_id=signal.event_id,
-                        outcome_name=signal.outcome_name,
-                        side=signal.side,
-                        order_type="ENTRY",
-                        requested_price=signal.suggested_price,
-                        requested_size_usd=self.config.stake_per_trade_usd,
-                        created_at=utc_now_iso(),
-                        metadata={"cycle_bucket": cycle_bucket},
-                    )
-                    await repo.save_order(intent)
-
-                    if self.config.dry_run:
-                        dry_run_fill = ExecutionResult(
-                            ok=True,
-                            order_id=f"entry-{signal.signal_id}",
+                        intent = OrderIntent(
                             signal_id=signal.signal_id,
                             market_id=signal.market_id,
+                            event_id=signal.event_id,
+                            outcome_name=signal.outcome_name,
                             side=signal.side,
                             order_type="ENTRY",
-                            filled_size_usd=0.0,
-                            fill_price=0.0,
-                            fees_usd=0.0,
-                            slippage_bps=0.0,
-                            timestamp=utc_now_iso(),
-                            status="dry_run_skipped",
+                            requested_price=signal.suggested_price,
+                            requested_size_usd=self.config.stake_per_trade_usd,
+                            created_at=utc_now_iso(),
+                            metadata={"cycle_bucket": cycle_bucket},
                         )
-                        await repo.save_fill(dry_run_fill)
-                        continue
+                        await repo.save_order(intent)
 
-                    exec_result = self.execution_adapter.execute(intent)
-                    await repo.save_fill(exec_result)
-                    if exec_result.ok and exec_result.filled_size_usd > 0:
-                        pos = self.position_manager.open_position(signal, exec_result)
-                        self.positions[pos.position_id] = pos
-                        await repo.save_position(pos)
-                        await repo.save_position_check(
-                            check_id=f"check-{pos.position_id}-entry",
-                            position_id=pos.position_id,
-                            latest_price=pos.entry_price,
-                            unrealized_pnl_usd=0.0,
-                            should_exit=False,
-                            exit_reason="entry",
-                            checked_at=utc_now_iso(),
-                        )
-                        opened += 1
-            else:
-                logger.info("Skipping Odds API refresh this cycle (monitoring only)")
+                        if self.config.dry_run:
+                            dry_run_fill = ExecutionResult(
+                                ok=True,
+                                order_id=f"entry-{signal.signal_id}",
+                                signal_id=signal.signal_id,
+                                market_id=signal.market_id,
+                                side=signal.side,
+                                order_type="ENTRY",
+                                filled_size_usd=0.0,
+                                fill_price=0.0,
+                                fees_usd=0.0,
+                                slippage_bps=0.0,
+                                timestamp=utc_now_iso(),
+                                status="dry_run_skipped",
+                            )
+                            await repo.save_fill(dry_run_fill)
+                            continue
 
-            closed = await self._monitor_open_positions_async(repo)
+                        exec_result = self.execution_adapter.execute(intent)
+                        await repo.save_fill(exec_result)
+                        if exec_result.ok and exec_result.filled_size_usd > 0:
+                            pos = self.position_manager.open_position(signal, exec_result)
+                            self.positions[pos.position_id] = pos
+                            await repo.save_position(pos)
+                            await repo.save_position_check(
+                                check_id=f"check-{pos.position_id}-entry",
+                                position_id=pos.position_id,
+                                latest_price=pos.entry_price,
+                                unrealized_pnl_usd=0.0,
+                                should_exit=False,
+                                exit_reason="entry",
+                                checked_at=utc_now_iso(),
+                            )
+                            opened += 1
+                else:
+                    logger.info("Skipping Odds API refresh this cycle (monitoring only)")
 
-        summary = {
-            "signals": signals_count,
-            "opened": opened,
-            "closed": closed,
-            "denied": denied,
-            "duplicates": skipped_duplicate,
-            "open_positions": len([p for p in self.positions.values() if p.is_open()]),
-        }
+                closed = await self._monitor_open_positions_async(
+                    repo,
+                    history_repo=history_repo if capture_enabled else None,
+                    run_id=run_id,
+                )
+
+                summary = {
+                    "signals": signals_count,
+                    "opened": opened,
+                    "closed": closed,
+                    "denied": denied,
+                    "duplicates": skipped_duplicate,
+                    "open_positions": len([p for p in self.positions.values() if p.is_open()]),
+                }
+                if capture_enabled and run_id:
+                    await history_repo.finish_data_run(run_id, status="completed", summary=summary)
+            except Exception as exc:
+                if capture_enabled and run_id:
+                    await session.rollback()
+                    await history_repo.finish_data_run(
+                        run_id,
+                        status="failed",
+                        summary={
+                            "signals": signals_count,
+                            "opened": opened,
+                            "closed": closed,
+                            "denied": denied,
+                            "duplicates": skipped_duplicate,
+                        },
+                        error=str(exc),
+                    )
+                raise
+
         logger.info(f"Auto-trader cycle summary: {summary}")
         return summary
 
-    async def _monitor_open_positions_async(self, repo: TradingRepository) -> int:
+    async def _monitor_open_positions_async(
+        self,
+        repo: TradingRepository,
+        history_repo: Optional[HistoryRepository] = None,
+        run_id: Optional[str] = None,
+    ) -> int:
         live_prices = await asyncio.to_thread(self._fetch_live_prices)
+        if history_repo is not None and run_id:
+            for raw_payload in self._last_live_raw_payloads:
+                await history_repo.save_raw_payload(run_id=run_id, **raw_payload)
+            await history_repo.save_live_price_snapshots(
+                self._last_live_price_snapshots,
+                run_id=run_id,
+            )
         closed = 0
         for position in list(self.positions.values()):
             if not position.is_open():
@@ -239,10 +308,22 @@ class AutoTraderEngine:
                 closed += 1
         return closed
 
-    def _load_comparison_data(self) -> List[dict]:
+    def _load_comparison_data(
+        self,
+        run_id: Optional[str] = None,
+        capture_enabled: bool = True,
+    ) -> List[dict]:
         if self.config.refresh_comparison_each_cycle:
             logger.info("Refreshing comparison data pipeline...")
-            refresh_comparison_pipeline()
+            with maybe_capture_data_run(
+                "odds_comparison_pipeline",
+                "auto_trader",
+                config=asdict(self.config),
+                run_id=run_id,
+                start_run=False,
+                enabled=capture_enabled,
+            ):
+                refresh_comparison_pipeline()
         data = load_json(self.config.comparison_data_path)
         if not isinstance(data, list):
             raise ValueError("Comparison data must be a list")
@@ -256,6 +337,8 @@ class AutoTraderEngine:
         return now.replace(minute=minute_bucket, second=0, microsecond=0).isoformat()
 
     def _fetch_live_prices(self) -> Dict[Tuple[str, str], float]:
+        self._last_live_price_snapshots = []
+        self._last_live_raw_payloads = []
         open_list = [p for p in self.positions.values() if p.is_open()]
         if not open_list:
             return {}
@@ -270,10 +353,25 @@ class AutoTraderEngine:
                 })
                 with urllib.request.urlopen(req, timeout=5) as resp:
                     market = json.loads(resp.read().decode())
+                self._last_live_raw_payloads.append(
+                    {
+                        "source": "polymarket_gamma",
+                        "endpoint": url,
+                        "request_params": {"market_id": mid, "kind": "live_market"},
+                        "payload": market,
+                        "status_code": getattr(resp, "status", None),
+                    }
+                )
                 slug = market.get("slug")
                 if slug:
                     self._market_slugs[mid] = slug
-                outcome_prices = json.loads(market.get("outcomePrices", "[]"))
+                prices_raw = market.get("outcomePrices", "[]")
+                outcome_prices = json.loads(prices_raw) if isinstance(prices_raw, str) else list(prices_raw or [])
+                try:
+                    token_ids_raw = market.get("clobTokenIds", "[]")
+                    token_ids = json.loads(token_ids_raw) if isinstance(token_ids_raw, str) else list(token_ids_raw or [])
+                except (json.JSONDecodeError, TypeError):
+                    token_ids = []
                 outcomes_raw = market.get("outcomes", "[]")
                 try:
                     outcomes = json.loads(outcomes_raw)
@@ -282,6 +380,26 @@ class AutoTraderEngine:
                 for i, name in enumerate(outcomes):
                     if i < len(outcome_prices):
                         price = float(outcome_prices[i])
+                        self._last_live_price_snapshots.append(
+                            {
+                                "market_id": mid,
+                                "event_id": market.get("event_id") or market.get("eventId"),
+                                "outcome_name": name,
+                                "token_id": token_ids[i] if i < len(token_ids) else None,
+                                "price": price,
+                                "bid": market.get("bestBid"),
+                                "ask": market.get("bestAsk"),
+                                "spread": market.get("spread"),
+                                "source": "polymarket_gamma",
+                                "payload": {
+                                    "market_id": mid,
+                                    "slug": slug,
+                                    "outcome_index": i,
+                                    "outcome_name": name,
+                                    "outcome_price": price,
+                                },
+                            }
+                        )
                         if price > 0:
                             result[(mid, name)] = price
             except Exception:

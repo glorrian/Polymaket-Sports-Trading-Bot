@@ -94,6 +94,7 @@ TRADING_DRY_RUN=true
 | `ENRICH_WITH_CLOB` | `false` | Include CLOB market metadata |
 | `USE_STORED_EVENTS` | `false` | Reuse cached sportsbook events |
 | `OUTPUT_DIR` | `data` | Output directory |
+| `DATA_CAPTURE_ENABLED` | `true` | Capture raw ingest, snapshots, and strategy inputs to SQLite |
 
 ### Trading variables
 | Variable | Default | Description |
@@ -126,6 +127,7 @@ Key artifacts:
 - `data/arbitrage_data_filtered.json`
 - `data/arbitrage_comparison.json`
 - `data/directional_arbitrage.json`
+- `data/trading.db` historical capture tables (`data_runs`, `raw_payloads`, snapshots)
 
 ## Auto-Trading Commands
 One-cycle dry run:
@@ -155,7 +157,7 @@ Signals can be denied for:
 - duplicate market exposure,
 - daily loss limit reached,
 - cooldown not elapsed.
-All decisions are written to `risk_events.jsonl` for audit and tuning.
+All decisions are written to SQLite for audit and tuning.
 
 ## Outputs and Journals
 Standard output files:
@@ -171,7 +173,12 @@ Trading journals in `data/trading/`:
 - `fills.jsonl`
 - `positions.jsonl`
 - `state.json`
-Use journals as authoritative lifecycle history.
+SQLite `data/trading.db` is the authoritative lifecycle and historical ingest store.
+
+Export replay-ready history:
+```bash
+python scripts/export_replay_dataset.py --start 2026-05-20T00:00:00Z --end 2026-05-21T00:00:00Z
+```
 
 ## Recommended Workflow
 1. Refresh comparison data.

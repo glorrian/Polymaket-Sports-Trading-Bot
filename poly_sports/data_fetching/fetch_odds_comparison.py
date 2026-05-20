@@ -7,14 +7,14 @@ from poly_sports.utils.file_utils import save_json, load_json
 from poly_sports.data_fetching.fetch_odds_data import fetch_odds_for_polymarket_events
 from poly_sports.utils.api_key_pool import ApiKeyPool
 from poly_sports.utils.logger import logger
+from poly_sports.db.history_capture import capture_raw_payload, current_capture, maybe_capture_data_run
 
 
 
 load_dotenv()
 
 
-def main() -> None:
-    """Main execution function to fetch and merge odds data."""
+def _run_comparison_pipeline() -> None:
     gamma_api_url = os.getenv('GAMMA_API_URL', 'https://gamma-api.polymarket.com')
     odds_api_regions = [r.strip() for r in os.getenv('ODDS_API_REGIONS', 'us,us_ex').split(',')]
     odds_api_markets = os.getenv('ODDS_API_MARKETS', 'h2h').split(',')
@@ -35,6 +35,12 @@ def main() -> None:
     filtered_path = Path(output_dir) / "arbitrage_data_filtered.json"
     logger.info(f"Loading arbitrage data from {filtered_path}...")
     arbitrage_data = load_json(str(filtered_path))
+    capture_raw_payload(
+        source="file_cache",
+        endpoint=str(filtered_path),
+        request_params={"kind": "arbitrage_filtered"},
+        payload=arbitrage_data,
+    )
 
     if not arbitrage_data:
         logger.info("No arbitrage data found. Run the filter step first:")
@@ -99,7 +105,34 @@ def main() -> None:
         logger.info(f"  Confidence: {sample.get('match_confidence', 0):.2f}")
         logger.info(f"  Sportsbooks: {sample.get('sportsbook_count', 0)}")
 
+    capture = current_capture()
+    if capture is not None:
+        capture.set_summary(
+            {
+                "total_markets_for_arbitrage": len(arbitrage_data),
+                "matched_events": len(comparison_data),
+                "comparison_json": str(json_filename),
+                "comparison_csv": str(csv_filename),
+                "api_key_usage": usage,
+            }
+        )
+
+
+def main() -> None:
+    """Main execution function to fetch and merge odds data."""
+    config = {
+        "gamma_api_url": os.getenv('GAMMA_API_URL', 'https://gamma-api.polymarket.com'),
+        "odds_api_regions": os.getenv('ODDS_API_REGIONS', 'us,us_ex'),
+        "odds_api_markets": os.getenv('ODDS_API_MARKETS', 'h2h'),
+        "odds_api_format": os.getenv('ODDS_API_ODDS_FORMAT', 'american'),
+        "output_dir": os.getenv('OUTPUT_DIR', 'data'),
+        "min_confidence": os.getenv('ODDS_API_MIN_CONFIDENCE', '0.8'),
+        "use_stored_events": os.getenv('USE_STORED_EVENTS', 'true'),
+        "events_dir": os.getenv('EVENTS_DIR', 'data/sportsbook_data/events'),
+    }
+    with maybe_capture_data_run("odds_comparison_pipeline", "odds_api", config=config):
+        _run_comparison_pipeline()
+
 
 if __name__ == '__main__':
     main()
-

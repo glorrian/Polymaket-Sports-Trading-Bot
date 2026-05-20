@@ -14,6 +14,13 @@ from poly_sports.utils.odds_utils import (
     decimal_to_implied_prob,
 )
 from poly_sports.utils.file_utils import save_json, load_json
+from poly_sports.db.history_capture import (
+    capture_comparison_snapshots,
+    capture_event_match_snapshots,
+    capture_raw_payload,
+    capture_sportsbook_event_snapshots,
+    capture_sportsbook_odds_snapshots,
+)
 
 from poly_sports.utils.logger import logger
 from pathlib import Path
@@ -162,7 +169,14 @@ def load_events_from_file(sport_key: str, events_dir: str = 'data/sportsbook_dat
     events_path = Path(events_dir) / f"{sport_key}.json"
     if events_path.exists():
         try:
-            return load_json(str(events_path))
+            data = load_json(str(events_path))
+            capture_raw_payload(
+                source="sportsbook_cache",
+                endpoint=str(events_path),
+                request_params={"sport_key": sport_key, "kind": "events"},
+                payload=data,
+            )
+            return data
         except Exception as e:
             logger.info(f"  Warning: Could not load events from {events_path}: {e}")
             return None
@@ -246,10 +260,12 @@ def fetch_odds_for_polymarket_events(
                 events_path.parent.mkdir(parents=True, exist_ok=True)
                 save_json(odds_events, str(events_path))
                 logger.info(f"  Saved JSON file: {events_path}")
+            capture_sportsbook_event_snapshots(sport_key, odds_events)
             
             # Step 2: Match Polymarket events to Odds API events
             matches = match_events(pm_events, odds_events, min_confidence=min_confidence)
             logger.info(f"  Found {len(matches)} matches (confidence >= {min_confidence})")
+            capture_event_match_snapshots(sport_key, matches)
             
             
             if not matches:
@@ -263,6 +279,12 @@ def fetch_odds_for_polymarket_events(
             if use_stored_events and odds_cache_path.exists():
                 try:
                     odds_with_bookmakers = load_json(str(odds_cache_path))
+                    capture_raw_payload(
+                        source="sportsbook_cache",
+                        endpoint=str(odds_cache_path),
+                        request_params={"sport_key": sport_key, "kind": "odds"},
+                        payload=odds_with_bookmakers,
+                    )
                 except Exception:
                     odds_with_bookmakers = None
                 if odds_with_bookmakers is not None:
@@ -280,6 +302,7 @@ def fetch_odds_for_polymarket_events(
             logger.info(f"  Fetched odds for {len(odds_with_bookmakers)} events")
             save_json(odds_with_bookmakers, f"data/sportsbook_data/odds/{sport_key}.json")
             logger.info(f"  Saved JSON file: data/sportsbook_data/odds/{sport_key}.json")
+            capture_sportsbook_odds_snapshots(sport_key, odds_with_bookmakers)
             
             # Step 4: Create a mapping of event_id -> odds_event (with bookmakers)
             odds_by_event_id = {event.get('id'): event for event in odds_with_bookmakers}
@@ -329,5 +352,5 @@ def fetch_odds_for_polymarket_events(
             logger.info(f"  Traceback: {traceback.format_exc()}")
             continue
     
+    capture_comparison_snapshots(merged_data)
     return merged_data
-

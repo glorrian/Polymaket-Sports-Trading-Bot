@@ -5,6 +5,7 @@ import requests
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 from poly_sports.utils.api_key_pool import ApiKeyPool
+from poly_sports.db.history_capture import capture_raw_payload
 
 load_dotenv()
 
@@ -42,11 +43,28 @@ def fetch_sports_list(api_key: Optional[str] = None) -> List[Dict[str, Any]]:
     url = f"{ODDS_API_BASE_URL}/v4/sports"
     params = {'apiKey': api_key}
     
+    response = None
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload=data,
+            status_code=getattr(response, "status_code", None),
+        )
+        return data
     except requests.exceptions.RequestException as e:
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload={"error": str(e)},
+            status="error",
+            status_code=getattr(response, "status_code", None),
+        )
         raise requests.exceptions.RequestException(f"Error fetching sports list: {e}")
 
 
@@ -76,11 +94,28 @@ def fetch_events(
     url = f"{ODDS_API_BASE_URL}/v4/sports/{sport_key}/events"
     params = {'apiKey': api_key}
     
+    response = None
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload=data,
+            status_code=getattr(response, "status_code", None),
+        )
+        return data
     except requests.exceptions.RequestException as e:
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload={"error": str(e)},
+            status="error",
+            status_code=getattr(response, "status_code", None),
+        )
         raise requests.exceptions.RequestException(f"Error fetching events for {sport_key}: {e}")
 
 
@@ -122,11 +157,28 @@ def fetch_odds(
         'oddsFormat': odds_format
     }
     
+    response = None
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload=data,
+            status_code=getattr(response, "status_code", None),
+        )
+        return data
     except requests.exceptions.RequestException as e:
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload={"error": str(e)},
+            status="error",
+            status_code=getattr(response, "status_code", None),
+        )
         raise requests.exceptions.RequestException(f"Error fetching odds for {sport_key}: {e}")
 
 
@@ -170,10 +222,26 @@ def fetch_event_odds(
         'oddsFormat': odds_format
     }
     
+    response = None
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload=data,
+            status_code=getattr(response, "status_code", None),
+        )
+        return data
     except requests.exceptions.RequestException as e:
+        capture_raw_payload(
+            source="odds_api",
+            endpoint=url,
+            request_params=params,
+            payload={"error": str(e)},
+            status="error",
+            status_code=getattr(response, "status_code", None),
+        )
         raise requests.exceptions.RequestException(f"Error fetching event odds for {event_id}: {e}")
-

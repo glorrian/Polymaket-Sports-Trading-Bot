@@ -93,6 +93,18 @@ def test_auto_trader_cycle_writes_to_database(
     open_count = cur.fetchone()[0]
     assert open_count >= 1, f"Expected open positions >= 1, got {open_count}"
 
+    cur.execute("SELECT COUNT(*) FROM data_runs WHERE run_type = 'auto_trader_cycle'")
+    data_runs_count = cur.fetchone()[0]
+    assert data_runs_count == 1, f"Expected one auto-trader data run, got {data_runs_count}"
+
+    cur.execute("SELECT COUNT(*) FROM comparison_snapshots")
+    comparison_count = cur.fetchone()[0]
+    assert comparison_count >= 1, f"Expected comparison snapshots >= 1, got {comparison_count}"
+
+    cur.execute("SELECT COUNT(*) FROM opportunity_snapshots")
+    opportunity_count = cur.fetchone()[0]
+    assert opportunity_count >= 1, f"Expected opportunity snapshots >= 1, got {opportunity_count}"
+
     conn.close()
 
 

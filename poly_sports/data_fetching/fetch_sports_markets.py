@@ -33,6 +33,12 @@ except ImportError:
 from poly_sports.utils import file_utils
 from poly_sports.utils.file_utils import save_json
 from poly_sports.utils.logger import logger
+from poly_sports.db.history_capture import (
+    capture_polymarket_market_snapshots,
+    capture_raw_payload,
+    current_capture,
+    maybe_capture_data_run,
+)
 
 # Load environment variables
 load_dotenv()
@@ -106,6 +112,13 @@ def _fetch_sports_markets_v1(api_url: str, limit: int = 1500, series_ids: Option
         response = requests.get(url, params=request_params)
         response.raise_for_status()
         data = response.json()
+        capture_raw_payload(
+            source="polymarket_gamma",
+            endpoint=url,
+            request_params=request_params,
+            payload=data,
+            status_code=getattr(response, "status_code", None),
+        )
         
         # Events endpoint returns a list directly
         if isinstance(data, list):
@@ -185,6 +198,16 @@ def _fetch_sports_markets_v2(api_url: str, limit_per_page: int = 50, max_events:
             response = requests.get(url, params=current_params, headers=headers)
             response.raise_for_status()
             data = response.json()
+            raw_payload_id = capture_raw_payload(
+                source="polymarket_gamma",
+                endpoint=url,
+                request_params=current_params,
+                payload=data,
+                status_code=getattr(response, "status_code", None),
+            )
+            if raw_payload_id:
+                raw_events = data if isinstance(data, list) else data.get("data", []) if isinstance(data, dict) else []
+                capture_polymarket_market_snapshots(raw_events, raw_payload_id=raw_payload_id)
             
             # Handle different response formats
             if isinstance(data, list):
@@ -251,6 +274,15 @@ def _fetch_sports_markets_simple(api_url: str, max_events: Optional[int] = None)
         response = requests.get(url, params=params, headers=headers, timeout=60)
         response.raise_for_status()
         data = response.json()
+        raw_payload_id = capture_raw_payload(
+            source="polymarket_gamma",
+            endpoint=url,
+            request_params=params,
+            payload=data,
+            status_code=getattr(response, "status_code", None),
+        )
+        if raw_payload_id:
+            capture_polymarket_market_snapshots(data, raw_payload_id=raw_payload_id)
         if not data:
             break
         all_events.extend(data)
@@ -1100,14 +1132,7 @@ def compare_fetch_methods(api_url: str, output_dir: str = 'data') -> None:
     print("=" * 80)
 
 
-def main() -> None:
-    """Main execution function."""
-    # Load configuration from environment
-    gamma_api_url = os.getenv('GAMMA_API_URL', 'https://gamma-api.polymarket.com')
-    clob_host = os.getenv('CLOB_HOST', 'https://clob.polymarket.com')
-    enrich_with_clob = os.getenv('ENRICH_WITH_CLOB', 'false').lower() == 'true'
-    output_dir = os.getenv('OUTPUT_DIR', 'data')
-    
+def _run_market_ingest(gamma_api_url: str, clob_host: str, enrich_with_clob: bool, output_dir: str) -> None:
     print(f"Fetching sports markets from {gamma_api_url}...")
     
     # Fetch sports markets in flattened market format
@@ -1180,6 +1205,34 @@ def main() -> None:
         else:
             enriched_count = sum(1 for market in markets if isinstance(market, dict) and "clob_data" in market)
         print(f"  Markets with CLOB data: {enriched_count}")
+
+    capture = current_capture()
+    if capture is not None:
+        capture.set_summary(
+            {
+                "total_sports_events": len(markets),
+                "total_arbitrage_markets": len(arbitrage_data),
+                "sports_markets_json": json_filename,
+                "arbitrage_json": arbitrage_json_filename,
+            }
+        )
+
+
+def main() -> None:
+    """Main execution function."""
+    gamma_api_url = os.getenv('GAMMA_API_URL', 'https://gamma-api.polymarket.com')
+    clob_host = os.getenv('CLOB_HOST', 'https://clob.polymarket.com')
+    enrich_with_clob = os.getenv('ENRICH_WITH_CLOB', 'false').lower() == 'true'
+    output_dir = os.getenv('OUTPUT_DIR', 'data')
+
+    config = {
+        "gamma_api_url": gamma_api_url,
+        "clob_host": clob_host,
+        "enrich_with_clob": enrich_with_clob,
+        "output_dir": output_dir,
+    }
+    with maybe_capture_data_run("polymarket_market_ingest", "polymarket_gamma", config=config):
+        _run_market_ingest(gamma_api_url, clob_host, enrich_with_clob, output_dir)
 
 
 def _save_to_csv_raw(data: List[Dict[str, Any]], filename: str) -> None:
@@ -1268,4 +1321,3 @@ if __name__ == '__main__':
     else:
         # Default: fetch and process markets
         main()
-

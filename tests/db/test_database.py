@@ -29,7 +29,23 @@ async def test_init_db_creates_all_tables():
 
     await init_db()
 
-    tables = ["signals", "orders", "fills", "positions", "risk_events", "position_checks"]
+    tables = [
+        "signals",
+        "orders",
+        "fills",
+        "positions",
+        "risk_events",
+        "position_checks",
+        "data_runs",
+        "raw_payloads",
+        "polymarket_market_snapshots",
+        "sportsbook_event_snapshots",
+        "sportsbook_odds_snapshots",
+        "event_match_snapshots",
+        "comparison_snapshots",
+        "opportunity_snapshots",
+        "live_price_snapshots",
+    ]
     async with async_engine.connect() as conn:
         for table in tables:
             result = await conn.execute(

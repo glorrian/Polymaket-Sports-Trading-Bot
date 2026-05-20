@@ -153,3 +153,224 @@ class PositionCheck(Base):
     checked_at: Mapped[datetime] = mapped_column(DateTime, index=True)
 
     position: Mapped["Position"] = relationship(back_populates="position_checks")
+
+
+class DataRun(Base):
+    """One ingest, comparison, or trading cycle run."""
+
+    __tablename__ = "data_runs"
+
+    run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_type: Mapped[str] = mapped_column(String(64), index=True)
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), default="running", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    config_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    summary_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    raw_payloads: Mapped[list["RawPayload"]] = relationship(back_populates="run")
+
+
+class RawPayload(Base):
+    """Full captured raw payload from an API response, cache read, or strategy input."""
+
+    __tablename__ = "raw_payloads"
+
+    payload_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(
+        String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True
+    )
+    source: Mapped[str] = mapped_column(String(64), index=True)
+    endpoint: Mapped[str] = mapped_column(Text)
+    request_params_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(32), default="ok", index=True)
+    status_code: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), index=True)
+    payload_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    row_count: Mapped[int] = mapped_column(Integer, default=0)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    payload_json: Mapped[Any] = mapped_column(JSON)
+
+    run: Mapped[Optional["DataRun"]] = relationship(back_populates="raw_payloads")
+
+    __table_args__ = (
+        Index("ix_raw_payloads_source_captured", "source", "captured_at"),
+    )
+
+
+class PolymarketMarketSnapshot(Base):
+    """Normalized Polymarket Gamma market/outcome/price snapshot."""
+
+    __tablename__ = "polymarket_market_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    raw_payload_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("raw_payloads.payload_id"), nullable=True, index=True)
+    event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    market_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    condition_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    outcome_index: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    outcome_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    token_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    outcome_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    last_trade_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    best_bid: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    best_ask: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spread: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    liquidity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    volume: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    market_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_pm_market_snapshots_market_time", "market_id", "captured_at"),
+        Index("ix_pm_market_snapshots_event_time", "event_id", "captured_at"),
+    )
+
+
+class SportsbookEventSnapshot(Base):
+    """Normalized The Odds API event metadata snapshot."""
+
+    __tablename__ = "sportsbook_event_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    raw_payload_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("raw_payloads.payload_id"), nullable=True, index=True)
+    odds_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    sport_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    home_team: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    away_team: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    commence_time: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    event_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_sb_event_snapshots_event_time", "odds_event_id", "captured_at"),
+    )
+
+
+class SportsbookOddsSnapshot(Base):
+    """Normalized bookmaker/market/outcome odds snapshot from The Odds API."""
+
+    __tablename__ = "sportsbook_odds_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    raw_payload_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("raw_payloads.payload_id"), nullable=True, index=True)
+    odds_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    sport_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    bookmaker_key: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    bookmaker_title: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    market_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    outcome_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True, index=True)
+    price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    point: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    odds_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_sb_odds_snapshots_event_time", "odds_event_id", "captured_at"),
+        Index("ix_sb_odds_snapshots_outcome_time", "outcome_name", "captured_at"),
+    )
+
+
+class EventMatchSnapshot(Base):
+    """Event matching decision between Polymarket and The Odds API."""
+
+    __tablename__ = "event_match_snapshots"
+
+    match_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    pm_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    pm_market_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    odds_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    sport_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    confidence: Mapped[float] = mapped_column(Float, default=0.0)
+    pm_home_team: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    pm_away_team: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    odds_home_team: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    odds_away_team: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    matched_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    match_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_event_match_snapshots_pm_odds", "pm_event_id", "odds_event_id"),
+    )
+
+
+class ComparisonSnapshot(Base):
+    """Merged strategy input row from Polymarket and sportsbook data."""
+
+    __tablename__ = "comparison_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    pm_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    pm_market_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    odds_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    sport_key: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    match_confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    sportsbook_count: Mapped[int] = mapped_column(Integer, default=0)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    comparison_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_comparison_snapshots_market_time", "pm_market_id", "captured_at"),
+        Index("ix_comparison_snapshots_sport_time", "sport_key", "captured_at"),
+    )
+
+
+class OpportunitySnapshot(Base):
+    """Strategy opportunity row generated from comparison data."""
+
+    __tablename__ = "opportunity_snapshots"
+
+    opportunity_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    signal_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    pm_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    pm_market_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    odds_event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    outcome_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True, index=True)
+    opportunity_type: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    profit_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    delta_difference: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    pm_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    target_probability: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    liquidity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spread: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    confidence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    opportunity_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_opportunity_snapshots_market_time", "pm_market_id", "created_at"),
+    )
+
+
+class LivePriceSnapshot(Base):
+    """Live price snapshot fetched while monitoring positions."""
+
+    __tablename__ = "live_price_snapshots"
+
+    snapshot_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[Optional[str]] = mapped_column(String(64), ForeignKey("data_runs.run_id"), nullable=True, index=True)
+    position_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    market_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    event_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    outcome_name: Mapped[Optional[str]] = mapped_column(String(256), nullable=True, index=True)
+    token_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)
+    price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    bid: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    ask: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    spread: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    source: Mapped[str] = mapped_column(String(64), default="polymarket_gamma", index=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    payload_json: Mapped[Dict[str, Any]] = mapped_column(JSON, default=dict)
+
+    __table_args__ = (
+        Index("ix_live_price_snapshots_market_time", "market_id", "captured_at"),
+        Index("ix_live_price_snapshots_outcome_time", "outcome_name", "captured_at"),
+    )
