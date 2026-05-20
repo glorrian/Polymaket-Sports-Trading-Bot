@@ -305,3 +305,71 @@ class TestMatchEvents:
         assert len(matches) == 1
         assert matches[0]['odds_event']['id'] == 'odds1'  # Should pick exact match
 
+
+class TestMatchEventsWithTitleTeams:
+    """Test matching when teams come from event title (vs homeTeamName/awayTeamName)."""
+
+    def test_match_soccer_from_title(self):
+        pm_events = [{
+            "homeTeamName": "Arsenal FC",
+            "awayTeamName": "Burnley FC",
+            "startTime": "2026-05-18T19:00:00Z",
+        }]
+        odds_events = [{
+            "id": "o1",
+            "home_team": "Arsenal",
+            "away_team": "Burnley",
+            "commence_time": "2026-05-18T19:00:00Z",
+        }]
+        matches = match_events(pm_events, odds_events, min_confidence=0.5)
+        assert len(matches) == 1
+
+    def test_match_nba_from_title(self):
+        pm_events = [{
+            "homeTeamName": "San Antonio Spurs",
+            "awayTeamName": "Oklahoma City Thunder",
+            "startTime": "2026-05-18T03:30:00Z",
+        }]
+        odds_events = [{
+            "id": "o1",
+            "home_team": "San Antonio Spurs",
+            "away_team": "Oklahoma City Thunder",
+            "commence_time": "2026-05-18T03:30:00Z",
+        }]
+        matches = match_events(pm_events, odds_events)
+        assert len(matches) == 1
+        assert matches[0]["confidence"] >= 0.9
+
+    def test_match_la_liga_from_title(self):
+        pm_events = [{
+            "homeTeamName": "Valencia CF",
+            "awayTeamName": "FC Barcelona",
+            "startTime": "2026-05-18T22:00:00Z",
+        }]
+        odds_events = [{
+            "id": "o1",
+            "home_team": "Valencia",
+            "away_team": "Barcelona",
+            "commence_time": "2026-05-18T22:00:00Z",
+        }]
+        matches = match_events(pm_events, odds_events, min_confidence=0.5)
+        assert len(matches) >= 1
+
+    def test_no_match_different_sports(self):
+        pm_events = [{
+            "homeTeamName": "Arsenal FC",
+            "awayTeamName": "Burnley FC",
+            "startTime": "2026-05-18T19:00:00Z",
+            "series_ticker": "soccer",
+        }]
+        odds_events = [{
+            "id": "o1",
+            "sport_key": "basketball_nba",
+            "home_team": "Arsenal FC",
+            "away_team": "Burnley FC",
+            "commence_time": "2026-05-18T19:00:00Z",
+        }]
+        matches = match_events(pm_events, odds_events)
+        assert len(matches) == 0
+
+

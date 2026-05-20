@@ -5,20 +5,18 @@ from dotenv import load_dotenv
 from poly_sports.data_fetching.fetch_sports_markets import save_to_csv
 from poly_sports.utils.file_utils import save_json, load_json
 from poly_sports.data_fetching.fetch_odds_data import fetch_odds_for_polymarket_events
+from poly_sports.utils.api_key_pool import ApiKeyPool
 from poly_sports.utils.logger import logger
 
 
 
-# Load environment variables
 load_dotenv()
 
 
 def main() -> None:
     """Main execution function to fetch and merge odds data."""
-    # Load configuration from environment
     gamma_api_url = os.getenv('GAMMA_API_URL', 'https://gamma-api.polymarket.com')
-    odds_api_key = os.getenv('ODDS_API_KEY')
-    odds_api_regions = os.getenv('ODDS_API_REGIONS', 'us, us_ex').split(',')
+    odds_api_regions = [r.strip() for r in os.getenv('ODDS_API_REGIONS', 'us,us_ex').split(',')]
     odds_api_markets = os.getenv('ODDS_API_MARKETS', 'h2h').split(',')
     odds_api_format = os.getenv('ODDS_API_ODDS_FORMAT', 'american')
     output_dir = os.getenv('OUTPUT_DIR', 'data')
@@ -26,11 +24,12 @@ def main() -> None:
     exclude_1h_moneyline = os.getenv('EXCLUDE_1H_MONEYLINE', 'false').lower() == 'true'
     use_stored_events = os.getenv('USE_STORED_EVENTS', 'true').lower() == 'true'
     events_dir = os.getenv('EVENTS_DIR', 'data/sportsbook_data/events')
-    
-    if not odds_api_key:
-        logger.info("Error: ODDS_API_KEY not found in environment variables")
-        logger.info("Please set ODDS_API_KEY in your .env file")
+
+    pool = ApiKeyPool.shared()
+    if not pool.keys:
+        logger.info("Error: No Odds API keys found. Set ODDS_API_KEYS or ODDS_API_KEY in .env")
         return
+    logger.info(f"Odds API key pool: {len(pool.keys)} key(s) loaded")
     
     # Load pre-filtered arbitrage markets created by fetch_sports_markets filter command.
     filtered_path = Path(output_dir) / "arbitrage_data_filtered.json"
@@ -55,7 +54,6 @@ def main() -> None:
     try:
         comparison_data = fetch_odds_for_polymarket_events(
             arbitrage_data,
-            api_key=odds_api_key,
             regions=odds_api_regions,
             markets=odds_api_markets,
             odds_format=odds_api_format,
@@ -82,7 +80,6 @@ def main() -> None:
     
     # Print summary
     logger.info(f"\nSummary:")
-    # print(f"  Total Polymarket events: {len(events)}")
     logger.info(f"  Total markets for arbitrage: {len(arbitrage_data)}")
     if exclude_1h_moneyline:
         logger.info(f"  (1h moneyline bets excluded)")
@@ -90,6 +87,8 @@ def main() -> None:
     logger.info(f"  Match rate: {len(comparison_data)/len(arbitrage_data)*100:.1f}%")
     logger.info(f"  Comparison JSON: {json_filename}")
     logger.info(f"  Comparison CSV: {csv_filename}")
+    usage = pool.usage_summary()
+    logger.info(f"  API key usage: {usage} (total {pool.total_requests()} requests)")
     
     # Print sample of matched events
     if comparison_data:

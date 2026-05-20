@@ -230,6 +230,42 @@ def _fetch_sports_markets_v2(api_url: str, limit_per_page: int = 50, max_events:
     return all_events
 
 
+def _fetch_sports_markets_simple(api_url: str, max_events: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Fetch sports markets using /events endpoint with offset-based pagination."""
+    url = f"{api_url}/events"
+    headers = {"Accept": "application/json"}
+    all_events: List[Dict[str, Any]] = []
+    limit = 100
+    offset = 0
+
+    while True:
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "active": "true",
+            "closed": "false",
+            "tag_slug": "sports",
+            "order": "volume",
+            "ascending": "false",
+        }
+        response = requests.get(url, params=params, headers=headers, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        if not data:
+            break
+        all_events.extend(data)
+        if len(data) < limit:
+            break
+        offset += limit
+        if max_events and len(all_events) >= max_events:
+            all_events = all_events[:max_events]
+            break
+        if offset > 10000:
+            break
+
+    return all_events
+
+
 def fetch_sports_markets(api_url: str, limit: int = 9999, series_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:
     """
     Fetch all sports markets from Gamma API using events/pagination endpoint with tag_slug filter.
@@ -251,9 +287,25 @@ def fetch_sports_markets(api_url: str, limit: int = 9999, series_ids: Optional[L
     # Convert limit to max_events for v2 implementation
     max_events = limit if limit > 0 else None
 
-    # Use v2 implementation (pagination with tag_slug)
-    events = _fetch_sports_markets_v2(api_url, limit_per_page=50, max_events=max_events)
-    return _extract_markets_from_events(events)
+    try:
+        events = _fetch_sports_markets_v2(api_url, limit_per_page=50, max_events=max_events)
+        return _extract_markets_from_events(events)
+    except Exception as exc:
+        logger.info(f"v2 pagination failed ({exc}), falling back to simple /events endpoint")
+        events = _fetch_sports_markets_simple(api_url, max_events=max_events)
+        return _extract_markets_from_events(events)
+
+
+def _parse_teams_from_title(title: str):
+    home, away = "", ""
+    cleaned = title.split(" - ")[0]
+    for sep in [" vs. ", " vs "]:
+        if sep in cleaned:
+            parts = cleaned.split(sep, 1)
+            home = parts[0].strip()
+            away = parts[1].strip()
+            break
+    return home, away
 
 
 def _extract_markets_from_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -262,8 +314,10 @@ def _extract_markets_from_events(events: List[Dict[str, Any]]) -> List[Dict[str,
     for event in events:
         event_id = event.get("id")
         event_title = event.get("title")
-        home_team = event.get("homeTeamName", "")
-        away_team = event.get("awayTeamName", "")
+        home_team = event.get("homeTeamName", "") or ""
+        away_team = event.get("awayTeamName", "") or ""
+        if not home_team and not away_team:
+            home_team, away_team = _parse_teams_from_title(event_title or "")
         start_time = event.get("startTime", event.get("eventDate", ""))
         event_date = event.get("eventDate", "")
         ended = event.get("ended", False)

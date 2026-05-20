@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import signal
 import sys
 import time
@@ -13,6 +14,7 @@ if str(_project_root) not in sys.path:
 
 from poly_sports.trading.config import TradingConfig
 from poly_sports.trading.engine import AutoTraderEngine
+from poly_sports.db.database import AsyncSessionFactory
 from poly_sports.utils.logger import logger
 
 
@@ -22,6 +24,22 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dry-run", action="store_true", help="Log decisions only; do not execute entries/exits")
     parser.add_argument("--interval", type=int, default=None, help="Override cycle interval seconds")
     return parser.parse_args()
+
+
+async def _run_loop(engine: AutoTraderEngine, args: argparse.Namespace) -> int:
+    ran = 0
+    while True:
+        if args.cycles and ran >= args.cycles:
+            break
+        try:
+            await engine.run_cycle()
+        except Exception as exc:
+            logger.error(f"Auto-trader cycle failed: {exc}")
+        ran += 1
+        if args.cycles and ran >= args.cycles:
+            break
+        await asyncio.sleep(max(1, engine.config.cycle_interval_seconds))
+    return ran
 
 
 def main() -> None:
@@ -39,7 +57,7 @@ def main() -> None:
         return
 
     try:
-        engine = AutoTraderEngine(config)
+        engine = AutoTraderEngine(config, AsyncSessionFactory)
     except Exception as exc:
         logger.error(f"Failed to initialize auto-trader engine: {exc}")
         return
@@ -58,19 +76,7 @@ def main() -> None:
         f"mode={config.trading_mode} dry_run={config.dry_run} interval={config.cycle_interval_seconds}s"
     )
 
-    ran = 0
-    while not stop["value"]:
-        if args.cycles and ran >= args.cycles:
-            break
-        try:
-            engine.run_cycle()
-        except Exception as exc:  # pragma: no cover - safety log path
-            logger.error(f"Auto-trader cycle failed: {exc}")
-        ran += 1
-        if args.cycles and ran >= args.cycles:
-            break
-        time.sleep(max(1, config.cycle_interval_seconds))
-
+    ran = asyncio.run(_run_loop(engine, args))
     logger.info(f"Auto Trader stopped after {ran} cycle(s)")
 
 

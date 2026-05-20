@@ -7,7 +7,9 @@ from poly_sports.data_fetching.fetch_odds_api import (
     fetch_events,
     fetch_odds,
     fetch_event_odds,
+    _resolve_key,
 )
+from poly_sports.utils.api_key_pool import ApiKeyPool
 
 
 class TestFetchSportsList:
@@ -282,4 +284,36 @@ class TestFetchEventOdds:
         # The function wraps HTTPError in RequestException
         with pytest.raises(requests.exceptions.RequestException):
             fetch_event_odds('nonexistent', 'americanfootball_nfl', 'test_api_key', regions=['us'], markets=['h2h'])
+
+
+class TestResolveKey:
+    def test_explicit_key_returned(self):
+        assert _resolve_key("my_key") == "my_key"
+
+    def test_none_key_uses_pool(self):
+        pool = ApiKeyPool(["pool_a", "pool_b"])
+        with patch("poly_sports.data_fetching.fetch_odds_api._pool", pool):
+            key = _resolve_key(None)
+            assert key == "pool_a"
+
+    def test_pool_rotates_on_each_call(self):
+        pool = ApiKeyPool(["k1", "k2"])
+        with patch("poly_sports.data_fetching.fetch_odds_api._pool", pool):
+            assert _resolve_key(None) == "k1"
+            assert _resolve_key(None) == "k2"
+            assert _resolve_key(None) == "k1"
+
+    @patch("fetch_odds_api.requests.get")
+    def test_fetch_uses_pool_when_no_key_passed(self, mock_get):
+        pool = ApiKeyPool(["rotating_key"])
+        mock_response = Mock()
+        mock_response.json.return_value = []
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        with patch("poly_sports.data_fetching.fetch_odds_api._pool", pool):
+            fetch_sports_list()
+            call_params = mock_get.call_args[1].get("params", {})
+            assert call_params.get("apiKey") == "rotating_key"
+
 

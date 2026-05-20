@@ -2,7 +2,13 @@
 import pytest
 from unittest.mock import Mock, patch, MagicMock
 import requests
-from poly_sports.data_fetching.fetch_sports_markets import fetch_sports_markets, filter_sports_markets
+from poly_sports.data_fetching.fetch_sports_markets import (
+    fetch_sports_markets,
+    filter_sports_markets,
+    _parse_teams_from_title,
+    _extract_markets_from_events,
+    _fetch_sports_markets_simple,
+)
 
 
 class TestFetchSportsMarkets:
@@ -195,4 +201,152 @@ class TestFilterSportsMarkets:
         
         assert len(result) == 1
         assert result[0]['id'] == '2'
+
+
+class TestParseTeamsFromTitle:
+    def test_vs_dot_separator(self):
+        home, away = _parse_teams_from_title("Arsenal FC vs. Burnley FC")
+        assert home == "Arsenal FC"
+        assert away == "Burnley FC"
+
+    def test_vs_separator(self):
+        home, away = _parse_teams_from_title("Spurs vs Thunder")
+        assert home == "Spurs"
+        assert away == "Thunder"
+
+    def test_strips_more_markets_suffix(self):
+        home, away = _parse_teams_from_title(
+            "Arsenal FC vs. Burnley FC - More Markets"
+        )
+        assert home == "Arsenal FC"
+        assert away == "Burnley FC"
+
+    def test_no_vs_returns_empty(self):
+        home, away = _parse_teams_from_title("2026 NHL Stanley Cup Champion")
+        assert home == ""
+        assert away == ""
+
+    def test_empty_string(self):
+        home, away = _parse_teams_from_title("")
+        assert home == ""
+        assert away == ""
+
+    def test_prefix_in_title(self):
+        home, away = _parse_teams_from_title(
+            "Dota 2: Team Liquid vs BetBoom Team (BO3) - PGL"
+        )
+        assert home == "Dota 2: Team Liquid"
+        assert away == "BetBoom Team (BO3)"
+
+
+class TestExtractMarketsFromEvents:
+    def test_extracts_teams_from_title_when_api_fields_empty(self):
+        events = [
+            {
+                "id": "ev1",
+                "title": "Arsenal FC vs. Burnley FC",
+                "homeTeamName": "",
+                "awayTeamName": "",
+                "startTime": "",
+                "eventDate": "",
+                "markets": [
+                    {"id": "m1", "question": "Who wins?", "outcomes": '["Arsenal FC","Burnley FC"]'}
+                ],
+            }
+        ]
+        result = _extract_markets_from_events(events)
+        assert len(result) == 1
+        assert result[0]["homeTeamName"] == "Arsenal FC"
+        assert result[0]["awayTeamName"] == "Burnley FC"
+
+    def test_uses_api_fields_when_present(self):
+        events = [
+            {
+                "id": "ev1",
+                "title": "Game",
+                "homeTeamName": "Lakers",
+                "awayTeamName": "Celtics",
+                "startTime": "",
+                "eventDate": "",
+                "markets": [
+                    {"id": "m1", "question": "Who wins?"}
+                ],
+            }
+        ]
+        result = _extract_markets_from_events(events)
+        assert result[0]["homeTeamName"] == "Lakers"
+        assert result[0]["awayTeamName"] == "Celtics"
+
+    def test_title_fallback_when_api_fields_missing(self):
+        events = [
+            {
+                "id": "ev1",
+                "title": "Spurs vs. Thunder",
+                "startTime": "",
+                "eventDate": "",
+                "markets": [
+                    {"id": "m1", "question": "Who wins?"}
+                ],
+            }
+        ]
+        result = _extract_markets_from_events(events)
+        assert result[0]["homeTeamName"] == "Spurs"
+        assert result[0]["awayTeamName"] == "Thunder"
+
+
+class TestFetchSportsMarketsSimple:
+    @patch("poly_sports.data_fetching.fetch_sports_markets.requests.get")
+    def test_single_page(self, mock_get):
+        mock_response = Mock()
+        mock_response.json.return_value = [
+            {"id": "ev1", "title": "A vs B", "markets": []}
+        ]
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        result = _fetch_sports_markets_simple("https://gamma-api.polymarket.com")
+        assert len(result) == 1
+
+    @patch("poly_sports.data_fetching.fetch_sports_markets.requests.get")
+    def test_pagination_with_offset(self, mock_get):
+        page1 = Mock()
+        page1.json.return_value = [{"id": f"ev{i}"} for i in range(100)]
+        page1.raise_for_status = Mock()
+
+        page2 = Mock()
+        page2.json.return_value = [{"id": f"ev{i}"} for i in range(100, 130)]
+        page2.raise_for_status = Mock()
+
+        mock_get.side_effect = [page1, page2]
+
+        result = _fetch_sports_markets_simple("https://gamma-api.polymarket.com")
+        assert len(result) == 130
+        assert mock_get.call_count == 2
+        second_call_params = mock_get.call_args_list[1][1].get("params", mock_get.call_args_list[1][0][1] if len(mock_get.call_args_list[1][0]) > 1 else {})
+        if isinstance(second_call_params, dict):
+            assert second_call_params.get("offset") == 100
+
+    @patch("poly_sports.data_fetching.fetch_sports_markets.requests.get")
+    def test_max_events_limit(self, mock_get):
+        mock_response = Mock()
+        mock_response.json.return_value = [{"id": f"ev{i}"} for i in range(100)]
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        result = _fetch_sports_markets_simple(
+            "https://gamma-api.polymarket.com", max_events=50
+        )
+        assert len(result) == 50
+
+    @patch("poly_sports.data_fetching.fetch_sports_markets.requests.get")
+    def test_empty_response_stops(self, mock_get):
+        mock_response = Mock()
+        mock_response.json.return_value = []
+        mock_response.raise_for_status = Mock()
+        mock_get.return_value = mock_response
+
+        result = _fetch_sports_markets_simple("https://gamma-api.polymarket.com")
+        assert len(result) == 0
+        assert mock_get.call_count == 1
+
 

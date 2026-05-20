@@ -4,12 +4,19 @@ import sys
 import requests
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
+from poly_sports.utils.api_key_pool import ApiKeyPool
 
-# Load environment variables
 load_dotenv()
 
-# Backward-compatibility alias for older tests/import paths.
 sys.modules.setdefault("fetch_odds_api", sys.modules[__name__])
+
+_pool = ApiKeyPool.shared()
+
+
+def _resolve_key(api_key: Optional[str]) -> str:
+    if api_key:
+        return api_key
+    return _pool.next_key()
 
 # Base URL for The Odds API
 ODDS_API_BASE_URL = 'https://api.the-odds-api.com'
@@ -30,10 +37,7 @@ def fetch_sports_list(api_key: Optional[str] = None) -> List[Dict[str, Any]]:
     Raises:
         requests.exceptions.RequestException: If API request fails
     """
-    if api_key is None:
-        api_key = os.getenv('ODDS_API_KEY')
-        if not api_key:
-            raise ValueError("ODDS_API_KEY not provided and not found in environment variables")
+    api_key = _resolve_key(api_key)
     
     url = f"{ODDS_API_BASE_URL}/v4/sports"
     params = {'apiKey': api_key}
@@ -67,10 +71,7 @@ def fetch_events(
     Raises:
         requests.exceptions.RequestException: If API request fails
     """
-    if api_key is None:
-        api_key = os.getenv('ODDS_API_KEY')
-        if not api_key:
-            raise ValueError("ODDS_API_KEY not provided and not found in environment variables")
+    api_key = _resolve_key(api_key)
     
     url = f"{ODDS_API_BASE_URL}/v4/sports/{sport_key}/events"
     params = {'apiKey': api_key}
@@ -106,10 +107,7 @@ def fetch_odds(
     Raises:
         requests.exceptions.RequestException: If API request fails
     """
-    if api_key is None:
-        api_key = os.getenv('ODDS_API_KEY')
-        if not api_key:
-            raise ValueError("ODDS_API_KEY not provided and not found in environment variables")
+    api_key = _resolve_key(api_key)
     
     if regions is None:
         regions = ['us']
@@ -157,10 +155,7 @@ def fetch_event_odds(
     Raises:
         requests.exceptions.RequestException: If API request fails
     """
-    if api_key is None:
-        api_key = os.getenv('ODDS_API_KEY')
-        if not api_key:
-            raise ValueError("ODDS_API_KEY not provided and not found in environment variables")
+    api_key = _resolve_key(api_key)
     
     if regions is None:
         regions = ['us']
