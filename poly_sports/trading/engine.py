@@ -49,14 +49,6 @@ class AutoTraderEngine:
             from .execution import PolymarketLiveExecutionAdapter
             self.execution_adapter = PolymarketLiveExecutionAdapter()
 
-    async def _init_from_db(self) -> None:
-        """Load open positions and seen signals from database."""
-        async with self._session_factory() as session:
-            repo = TradingRepository(session)
-            self.positions = {p.position_id: p for p in await repo.get_open_positions()}
-            self.seen_signal_ids = await repo.get_seen_signal_ids()
-            self.realized_pnl_today = await repo.get_realized_pnl_today()
-
     async def run_cycle(self) -> Dict[str, int]:
         self._cycle_count += 1
         need_comparison = (self._cycle_count % self._comparison_interval == 1)
@@ -139,7 +131,7 @@ class AutoTraderEngine:
                     if self.config.dry_run:
                         dry_run_fill = ExecutionResult(
                             ok=True,
-                            order_id=intent.signal_id.replace("sig", "ord"),
+                            order_id=f"entry-{signal.signal_id}",
                             signal_id=signal.signal_id,
                             market_id=signal.market_id,
                             side=signal.side,
@@ -187,7 +179,7 @@ class AutoTraderEngine:
         return summary
 
     async def _monitor_open_positions_async(self, repo: TradingRepository) -> int:
-        live_prices = self._fetch_live_prices()
+        live_prices = await asyncio.to_thread(self._fetch_live_prices)
         closed = 0
         for position in list(self.positions.values()):
             if not position.is_open():

@@ -1,35 +1,22 @@
 import { NextResponse } from "next/server";
-import { readFileSync, existsSync } from "fs";
-import { join } from "path";
+import { getOpenPositions, getClosedPositions } from "@/lib/db";
 
 const GAMMA_API = "https://gamma-api.polymarket.com";
-const DATA_DIR = join(process.cwd(), "..", "data", "trading");
-
-interface Position {
-  position_id: string;
-  market_id: string;
-  outcome_name: string;
-  entry_price: number;
-  size_usd: number;
-  status: string;
-}
-
-interface State {
-  positions: Position[];
-}
 
 export async function GET() {
   try {
-    const statePath = join(DATA_DIR, "state.json");
-    if (!existsSync(statePath)) return NextResponse.json({});
+    const openPositions = getOpenPositions();
+    const closedPositions = getClosedPositions();
 
-    const state: State = JSON.parse(readFileSync(statePath, "utf-8"));
-    const openPositions = state.positions.filter((p) => p.status === "OPEN");
-    const closedPositions = state.positions.filter((p) => p.status !== "OPEN");
-    const allPositions = state.positions;
-    if (allPositions.length === 0) return NextResponse.json({});
+    if (openPositions.length === 0 && closedPositions.length === 0) {
+      return NextResponse.json({});
+    }
 
-    const marketIds = [...new Set(allPositions.map((p) => p.market_id))];
+    const marketIds = [...new Set([
+      ...openPositions.map((p) => p.market_id as string),
+      ...closedPositions.map((p) => p.market_id as string),
+    ])];
+
     const marketData: Record<string, { prices: { price: number; outcome_name: string }[]; slug: string | null }> = {};
 
     await Promise.all(
@@ -77,20 +64,22 @@ export async function GET() {
     > = {};
 
     for (const pos of openPositions) {
-      const md = marketData[pos.market_id];
+      const md = marketData[pos.market_id as string];
       if (!md) continue;
 
       const match = md.prices.find(
         (p) =>
-          p.outcome_name.toLowerCase().includes(pos.outcome_name.toLowerCase()) ||
-          pos.outcome_name.toLowerCase().includes(p.outcome_name.toLowerCase())
+          p.outcome_name.toLowerCase().includes((pos.outcome_name as string).toLowerCase()) ||
+          (pos.outcome_name as string).toLowerCase().includes(p.outcome_name.toLowerCase())
       );
       if (!match || match.price <= 0) continue;
 
-      const livePnl = pos.size_usd * (match.price / pos.entry_price - 1);
-      const livePnlPct = (match.price / pos.entry_price - 1) * 100;
+      const entry_price = pos.entry_price as number;
+      const size_usd = pos.size_usd as number;
+      const livePnl = size_usd * (match.price / entry_price - 1);
+      const livePnlPct = (match.price / entry_price - 1) * 100;
 
-      result[pos.position_id] = {
+      result[pos.position_id as string] = {
         current_price: match.price,
         bid: 0,
         ask: 0,
@@ -101,10 +90,10 @@ export async function GET() {
     }
 
     for (const pos of closedPositions) {
-      const md = marketData[pos.market_id];
+      const md = marketData[pos.market_id as string];
       if (!md || !md.slug) continue;
-      if (result[pos.position_id]) continue;
-      result[pos.position_id] = {
+      if (result[pos.position_id as string]) continue;
+      result[pos.position_id as string] = {
         current_price: 0,
         bid: 0,
         ask: 0,

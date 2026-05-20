@@ -14,7 +14,7 @@ if str(_project_root) not in sys.path:
 
 from poly_sports.trading.config import TradingConfig
 from poly_sports.trading.engine import AutoTraderEngine
-from poly_sports.db.database import AsyncSessionFactory
+from poly_sports.db.database import AsyncSessionFactory, init_db
 from poly_sports.utils.logger import logger
 
 
@@ -57,6 +57,7 @@ def main() -> None:
         return
 
     try:
+        await init_db()
         engine = AutoTraderEngine(config, AsyncSessionFactory)
     except Exception as exc:
         logger.error(f"Failed to initialize auto-trader engine: {exc}")
