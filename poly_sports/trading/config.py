@@ -35,6 +35,11 @@ class TradingConfig:
     enable_live_trading: bool = False
     live_private_key: str = ""
     live_proxy_address: str = ""
+    price_feed_source: str = "ws"
+    polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    ws_quote_stale_ms: int = 5000
+    ws_warmup_timeout_ms: int = 2000
+    paper_execution_use_live_quote: bool = True
 
     @classmethod
     def from_env(cls) -> "TradingConfig":
@@ -65,6 +70,16 @@ class TradingConfig:
             # PRIVATE_KEY/PK and POLYMARKET_PROXY_ADDRESS/BROWSER_ADDRESS
             live_private_key=(os.getenv("PRIVATE_KEY") or os.getenv("PK") or "").strip(),
             live_proxy_address=(os.getenv("POLYMARKET_PROXY_ADDRESS") or os.getenv("BROWSER_ADDRESS") or "").strip(),
+            price_feed_source=os.getenv("PRICE_FEED_SOURCE", "ws").strip().lower(),
+            polymarket_ws_url=os.getenv(
+                "POLYMARKET_WS_URL",
+                "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+            ).strip(),
+            ws_quote_stale_ms=int(os.getenv("WS_QUOTE_STALE_MS", "5000")),
+            ws_warmup_timeout_ms=int(os.getenv("WS_WARMUP_TIMEOUT_MS", "2000")),
+            paper_execution_use_live_quote=os.getenv(
+                "PAPER_EXECUTION_USE_LIVE_QUOTE", "true"
+            ).strip().lower() == "true",
         )
 
     def validate(self) -> None:
@@ -90,3 +105,9 @@ class TradingConfig:
             raise ValueError("TRADING_MIN_PROFIT must be >= 0")
         if self.fee_bps < 0 or self.slippage_bps < 0:
             raise ValueError("Fee/slippage bps cannot be negative")
+        if self.price_feed_source not in {"ws", "gamma", "disabled"}:
+            raise ValueError("PRICE_FEED_SOURCE must be one of: ws, gamma, disabled")
+        if self.ws_quote_stale_ms < 1:
+            raise ValueError("WS_QUOTE_STALE_MS must be >= 1")
+        if self.ws_warmup_timeout_ms < 0:
+            raise ValueError("WS_WARMUP_TIMEOUT_MS must be >= 0")

@@ -113,6 +113,11 @@ TRADING_DRY_RUN=true
 | `TRADING_COOLDOWN_SECONDS` | `300` | Post-close cooldown |
 | `TRADING_COMPARISON_PATH` | `data/arbitrage_comparison.json` | Signal input file |
 | `TRADING_JOURNAL_DIR` | `data/trading` | Journal output path |
+| `PRICE_FEED_SOURCE` | `ws` | Live price source for paper monitoring (`ws`, `gamma`, `disabled`) |
+| `POLYMARKET_WS_URL` | `wss://ws-subscriptions-clob.polymarket.com/ws/market` | Polymarket market WebSocket endpoint |
+| `WS_QUOTE_STALE_MS` | `5000` | Max quote age before falling back |
+| `WS_WARMUP_TIMEOUT_MS` | `2000` | Time to wait for a first WS quote after subscribing |
+| `PAPER_EXECUTION_USE_LIVE_QUOTE` | `true` | Use executable WS/CLOB quote for paper entry price |
 
 ## Pipeline Commands
 Run the full data pipeline:
@@ -213,6 +218,10 @@ pytest tests/ -v
 Run trading-focused tests:
 ```bash
 pytest tests/test_trading_*.py -q
+```
+Run live Polymarket smoke checks:
+```bash
+RUN_POLYMARKET_SMOKE=1 pytest tests/smoke/test_polymarket_api_smoke.py -q
 ```
 
 ## Project Structure

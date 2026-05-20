@@ -31,4 +31,6 @@ packages = ["poly_sports"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-
+markers = [
+    "smoke: opt-in network checks against external APIs",
+]

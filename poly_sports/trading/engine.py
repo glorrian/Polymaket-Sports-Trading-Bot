@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import urllib.parse
 import urllib.request
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from poly_sports.data_fetching.fetch_odds_comparison import main as refresh_comparison_pipeline
 from poly_sports.db.history_capture import is_data_capture_enabled, maybe_capture_data_run
 from poly_sports.db.history_repository import HistoryRepository
+from poly_sports.market_data import PolymarketWsPriceFeed, PriceQuote, parse_clob_token_ids
 from poly_sports.db.repository import TradingRepository
 from poly_sports.processing.arbitrage_calculation import detect_arbitrage_opportunities
 from poly_sports.utils.file_utils import load_json
@@ -28,6 +30,7 @@ from .position_manager import PositionManager
 from .risk_engine import RiskEngine
 
 GAMMA_API = "https://gamma-api.polymarket.com"
+CLOB_API = "https://clob.polymarket.com"
 
 
 class AutoTraderEngine:
@@ -47,6 +50,12 @@ class AutoTraderEngine:
         self._market_slugs: Dict[str, str] = {}
         self._last_live_price_snapshots: List[Dict[str, Any]] = []
         self._last_live_raw_payloads: List[Dict[str, Any]] = []
+        self.price_feed: Optional[PolymarketWsPriceFeed] = None
+        if config.price_feed_source == "ws":
+            self.price_feed = PolymarketWsPriceFeed(
+                ws_url=config.polymarket_ws_url,
+                quote_stale_ms=config.ws_quote_stale_ms,
+            )
 
         if config.trading_mode == "paper":
             self.execution_adapter = PaperExecutionAdapter(config)
@@ -89,6 +98,7 @@ class AutoTraderEngine:
 
                 if need_comparison:
                     comparison_data = self._load_comparison_data(run_id=run_id, capture_enabled=capture_enabled)
+                    token_lookup = self._build_token_lookup_from_comparison(comparison_data)
                     if capture_enabled and run_id:
                         await history_repo.save_raw_payload(
                             source="file_cache",
@@ -110,6 +120,8 @@ class AutoTraderEngine:
                     opportunities = [opportunity_from_dict(row) for row in raw_opps]
                     cycle_bucket = self._build_cycle_bucket()
                     signals = build_signals(opportunities, cycle_bucket)
+                    self._attach_signal_token_ids(signals, token_lookup)
+                    await self._subscribe_signal_tokens(signals)
                     signals_count = len(signals)
 
                     for signal in signals:
@@ -148,6 +160,11 @@ class AutoTraderEngine:
                             denied += 1
                             continue
 
+                        requested_price, price_metadata = await self._resolve_live_order_price(
+                            signal,
+                            fallback_price=signal.suggested_price,
+                        )
+
                         intent = OrderIntent(
                             signal_id=signal.signal_id,
                             market_id=signal.market_id,
@@ -155,10 +172,10 @@ class AutoTraderEngine:
                             outcome_name=signal.outcome_name,
                             side=signal.side,
                             order_type="ENTRY",
-                            requested_price=signal.suggested_price,
+                            requested_price=requested_price,
                             requested_size_usd=self.config.stake_per_trade_usd,
                             created_at=utc_now_iso(),
-                            metadata={"cycle_bucket": cycle_bucket},
+                            metadata={"cycle_bucket": cycle_bucket, **price_metadata},
                         )
                         await repo.save_order(intent)
 
@@ -241,7 +258,7 @@ class AutoTraderEngine:
         history_repo: Optional[HistoryRepository] = None,
         run_id: Optional[str] = None,
     ) -> int:
-        live_prices = await asyncio.to_thread(self._fetch_live_prices)
+        live_prices = await self._fetch_live_prices_async()
         if history_repo is not None and run_id:
             for raw_payload in self._last_live_raw_payloads:
                 await history_repo.save_raw_payload(run_id=run_id, **raw_payload)
@@ -280,7 +297,10 @@ class AutoTraderEngine:
                 requested_price=decision.latest_price or position.entry_price,
                 requested_size_usd=position.size_usd,
                 created_at=utc_now_iso(),
-                metadata={"exit_reason": decision.reason},
+                metadata={
+                    "exit_reason": decision.reason,
+                    **self._metadata_from_position_quote(position, decision.latest_price),
+                },
             )
 
             if self.config.dry_run:
@@ -307,6 +327,97 @@ class AutoTraderEngine:
                 self.risk.mark_market_cooldown(position.market_id)
                 closed += 1
         return closed
+
+    def _build_token_lookup_from_comparison(self, comparison_data: List[dict]) -> Dict[Tuple[str, str], str]:
+        lookup: Dict[Tuple[str, str], str] = {}
+        for row in comparison_data:
+            market_id = str(row.get("pm_market_id", "") or "")
+            outcomes_raw = row.get("pm_market_outcomes", [])
+            try:
+                outcomes = json.loads(outcomes_raw) if isinstance(outcomes_raw, str) else list(outcomes_raw or [])
+            except (json.JSONDecodeError, TypeError):
+                outcomes = []
+            token_ids = parse_clob_token_ids(row.get("pm_clobTokenIds") or row.get("pm_clob_token_ids"))
+            for idx, outcome_name in enumerate(outcomes):
+                if market_id and idx < len(token_ids):
+                    lookup[(market_id, str(outcome_name))] = token_ids[idx]
+        return lookup
+
+    def _attach_signal_token_ids(self, signals: List[Signal], token_lookup: Dict[Tuple[str, str], str]) -> None:
+        for signal in signals:
+            token_id = token_lookup.get((signal.market_id, signal.outcome_name))
+            if token_id:
+                signal.metadata["token_id"] = token_id
+
+    async def _subscribe_signal_tokens(self, signals: List[Signal]) -> None:
+        if not self.price_feed or not self.config.paper_execution_use_live_quote:
+            return
+        asset_metadata: Dict[str, Dict[str, Any]] = {}
+        for signal in signals:
+            token_id = signal.metadata.get("token_id")
+            if not token_id:
+                continue
+            asset_metadata[str(token_id)] = {
+                "market_id": signal.market_id,
+                "event_id": signal.event_id,
+                "outcome_name": signal.outcome_name,
+            }
+        if not asset_metadata:
+            return
+        await self.price_feed.subscribe_assets(asset_metadata)
+        await self.price_feed.wait_for_assets(asset_metadata.keys(), self.config.ws_warmup_timeout_ms)
+
+    async def _resolve_live_order_price(self, signal: Signal, fallback_price: float) -> Tuple[float, Dict[str, Any]]:
+        token_id = signal.metadata.get("token_id")
+        if not self.config.paper_execution_use_live_quote or not token_id:
+            return fallback_price, {}
+
+        quote = self.price_feed.get_quote_by_asset(str(token_id)) if self.price_feed else None
+        price, metadata = self._price_from_quote(quote, signal.side)
+        if price is not None:
+            metadata["token_id"] = str(token_id)
+            return price, metadata
+
+        clob_price = await asyncio.to_thread(self._fetch_clob_rest_price, str(token_id), signal.side)
+        if clob_price is not None:
+            return clob_price, {"token_id": str(token_id), "quote_source": "clob_rest"}
+
+        return fallback_price, {"token_id": str(token_id), "quote_source": "strategy_fallback"}
+
+    def _price_from_quote(self, quote: Optional[PriceQuote], side: str) -> Tuple[Optional[float], Dict[str, Any]]:
+        if quote is None or quote.is_stale(self.config.ws_quote_stale_ms):
+            return None, {}
+        price = quote.executable_price(side)
+        if price is None or price <= 0:
+            return None, {}
+        return price, {
+            "quote_source": "polymarket_ws_market",
+            "best_bid": quote.best_bid,
+            "best_ask": quote.best_ask,
+            "midpoint": quote.midpoint,
+            "last_trade_price": quote.last_trade_price,
+            "quote_age_ms": round(quote.age_ms(), 2),
+        }
+
+    def _metadata_from_position_quote(self, position: Position, latest_price: Optional[float]) -> Dict[str, Any]:
+        token_id = position.metadata.get("token_id")
+        metadata: Dict[str, Any] = {}
+        if token_id:
+            metadata["token_id"] = token_id
+        quote = self.price_feed.get_quote_by_asset(str(token_id)) if self.price_feed and token_id else None
+        if quote and not quote.is_stale(self.config.ws_quote_stale_ms):
+            metadata.update(
+                {
+                    "quote_source": "polymarket_ws_market",
+                    "best_bid": quote.best_bid,
+                    "best_ask": quote.best_ask,
+                    "midpoint": quote.midpoint,
+                    "quote_age_ms": round(quote.age_ms(), 2),
+                }
+            )
+        elif latest_price:
+            metadata["quote_source"] = "price_monitor"
+        return metadata
 
     def _load_comparison_data(
         self,
@@ -336,9 +447,59 @@ class AutoTraderEngine:
         )
         return now.replace(minute=minute_bucket, second=0, microsecond=0).isoformat()
 
-    def _fetch_live_prices(self) -> Dict[Tuple[str, str], float]:
+    def _fetch_clob_rest_price(self, token_id: str, side: str) -> Optional[float]:
+        try:
+            query = urllib.parse.urlencode({"token_id": token_id, "side": side.upper()})
+            url = f"{CLOB_API}/price?{query}"
+            req = urllib.request.Request(url, headers={"Accept": "application/json"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                payload = json.loads(resp.read().decode())
+            return float(payload["price"]) if payload.get("price") is not None else None
+        except Exception:
+            return None
+
+    async def _fetch_live_prices_async(self) -> Dict[Tuple[str, str], float]:
         self._last_live_price_snapshots = []
         self._last_live_raw_payloads = []
+        result: Dict[Tuple[str, str], float] = {}
+
+        if self.price_feed:
+            asset_metadata: Dict[str, Dict[str, Any]] = {}
+            for position in self.positions.values():
+                if not position.is_open():
+                    continue
+                token_id = position.metadata.get("token_id")
+                if not token_id:
+                    continue
+                asset_metadata[str(token_id)] = {
+                    "market_id": position.market_id,
+                    "event_id": position.event_id,
+                    "outcome_name": position.outcome_name,
+                }
+            if asset_metadata:
+                await self.price_feed.subscribe_assets(asset_metadata)
+                await self.price_feed.wait_for_assets(asset_metadata.keys(), self.config.ws_warmup_timeout_ms)
+                for position in self.positions.values():
+                    if not position.is_open():
+                        continue
+                    token_id = position.metadata.get("token_id")
+                    quote = self.price_feed.get_quote_by_asset(str(token_id)) if token_id else None
+                    exit_side = "SELL" if position.side == "BUY" else "BUY"
+                    price, _ = self._price_from_quote(quote, exit_side)
+                    if price is not None:
+                        result[(position.market_id, position.outcome_name)] = price
+
+                for raw_event in self.price_feed.drain_raw_events():
+                    self._last_live_raw_payloads.append(raw_event)
+                self._last_live_price_snapshots.extend(self.price_feed.quote_snapshots())
+
+        if self.config.price_feed_source != "disabled":
+            gamma_prices = await asyncio.to_thread(self._fetch_gamma_live_prices)
+            for key, value in gamma_prices.items():
+                result.setdefault(key, value)
+        return result
+
+    def _fetch_gamma_live_prices(self) -> Dict[Tuple[str, str], float]:
         open_list = [p for p in self.positions.values() if p.is_open()]
         if not open_list:
             return {}

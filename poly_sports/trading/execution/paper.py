@@ -48,5 +48,5 @@ class PaperExecutionAdapter(ExecutionAdapter):
             slippage_bps=self.config.slippage_bps,
             timestamp=now,
             status="filled" if fill_ratio >= 0.999 else "partial_fill",
-            metadata={"fill_ratio": round(fill_ratio, 6)},
+            metadata={**intent.metadata, "fill_ratio": round(fill_ratio, 6)},
         )

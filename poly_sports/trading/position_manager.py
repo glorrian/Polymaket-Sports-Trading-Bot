@@ -39,7 +39,14 @@ class PositionManager:
             take_profit_price=take_profit_price,
             max_holding_minutes=self.config.max_holding_minutes,
             entry_fees_usd=execution.fees_usd,
-            metadata={"signal_confidence": signal.confidence},
+            metadata={
+                "signal_confidence": signal.confidence,
+                "token_id": execution.metadata.get("token_id") or signal.metadata.get("token_id"),
+                "quote_source": execution.metadata.get("quote_source"),
+                "best_bid": execution.metadata.get("best_bid"),
+                "best_ask": execution.metadata.get("best_ask"),
+                "quote_age_ms": execution.metadata.get("quote_age_ms"),
+            },
         )
 
     def evaluate_exit(
