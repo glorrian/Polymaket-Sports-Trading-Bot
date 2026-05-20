@@ -94,3 +94,19 @@ def test_auto_trader_cycle_writes_to_database(
     assert open_count >= 1, f"Expected open positions >= 1, got {open_count}"
 
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_monitor_uses_thread_pool_for_fetch_live_prices(tmp_path: Path):
+    """_monitor_open_positions_async uses asyncio.to_thread for _fetch_live_prices."""
+    import ast
+    import inspect
+    import textwrap
+    from poly_sports.trading.engine import AutoTraderEngine
+
+    source = inspect.getsource(AutoTraderEngine._monitor_open_positions_async)
+    dedented = textwrap.dedent(source)
+    tree = ast.parse(dedented)
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    to_thread_calls = [c for c in calls if isinstance(c.func, ast.Attribute) and c.func.attr == "to_thread"]
+    assert len(to_thread_calls) >= 1, "asyncio.to_thread should be used in _monitor_open_positions_async"

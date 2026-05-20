@@ -56,3 +56,37 @@ def test_data_dir_created():
     from poly_sports.db.database import DATA_DIR
 
     assert DATA_DIR.exists()
+
+
+def test_async_engine_wal_mode():
+    """Async engine sync_connection has WAL journal_mode pragma set."""
+    import sqlite3
+    from poly_sports.db.database import async_engine
+
+    db_path = str(async_engine.url.database)
+    conn = sqlite3.connect(db_path)
+    try:
+        result = conn.execute("PRAGMA journal_mode").fetchone()
+        mode = result[0]
+    finally:
+        conn.close()
+
+    assert mode == "wal", f"Expected WAL mode on async engine, got {mode}"
+
+
+def test_init_db_called_on_startup():
+    """run_auto_trader main() calls init_db() via asyncio.run()."""
+    import ast
+    import inspect
+    from scripts.run_auto_trader import main
+
+    source = inspect.getsource(main)
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            if hasattr(node.func, "attr") and node.func.attr == "run":
+                for arg in node.args:
+                    if isinstance(arg, ast.Call):
+                        if isinstance(arg.func, ast.Name) and arg.func.id == "init_db":
+                            return
+    assert False, "asyncio.run(init_db()) should be called in main()"

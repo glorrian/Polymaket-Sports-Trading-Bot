@@ -57,7 +57,7 @@ def main() -> None:
         return
 
     try:
-        await init_db()
+        asyncio.run(init_db())
         engine = AutoTraderEngine(config, AsyncSessionFactory)
     except Exception as exc:
         logger.error(f"Failed to initialize auto-trader engine: {exc}")
